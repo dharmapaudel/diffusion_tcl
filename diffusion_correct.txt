@@ -1,0 +1,226 @@
+# ===== FINAL CORRECT DIFFUSION CALCULATION =====
+# For ligand "segname HETA" with 53 atoms
+
+puts "\n===== FINAL DIFFUSION COEFFICIENT =====\n"
+
+set sel [atomselect top "segname HETA"]
+set nf [molinfo top get numframes]
+
+# Verify selection
+puts "Ligand selection: segname HETA"
+puts "Number of atoms: [$sel num]"
+puts "Atoms per frame check:"
+for {set i 0} {$i < 3} {incr i} {
+    $sel frame [expr {$i * 1000}]
+    puts "  Frame [expr {$i * 1000}]: [$sel num] atoms"
+}
+
+# Parameters
+set stride 100  ;# Analyze every 100th frame
+set timestep 2.0e-15    ;# 2.0 fs
+set dcdfreq 50000       ;# Save every 50,000 steps
+set dt_frame [expr {$timestep * $dcdfreq * $stride}]  ;# 10 ns
+
+puts "\nTime parameters:"
+puts "  Time between analyzed frames: [format "%.1f" [expr {$dt_frame * 1e9}]] ns"
+
+# Method 1: SIMPLE CALCULATION (most reliable)
+puts "\n===== METHOD 1: SIMPLE MSD (lag=1) ====="
+
+set com_traj {}
+for {set i 0} {$i < $nf} {incr i $stride} {
+    $sel frame $i
+    lappend com_traj [measure center $sel weight mass]
+}
+
+set npoints [llength $com_traj]
+puts "COM points calculated: $npoints"
+
+# Calculate MSD for lag=1 (10 ns intervals)
+set sum_msd 0.0
+set count 0
+for {set i 0} {$i < $npoints-1} {incr i} {
+    set dr [vecsub [lindex $com_traj [expr {$i+1}]] [lindex $com_traj $i]]
+    set sum_msd [expr {$sum_msd + [vecdot $dr $dr]}]
+    incr count
+}
+
+set msd_avg [expr {$sum_msd / $count}]
+set D_simple [expr {($msd_avg * 1e-20) / (6 * $dt_frame)}]
+
+puts "MSD over [format "%.0f" [expr {$dt_frame * 1e9}]] ns: [format "%.1f" $msd_avg] Å²"
+puts "Based on $count comparisons"
+puts "D_simple = [format "%.3e" $D_simple] m²/s"
+
+# Method 2: MULTIPLE TIME INTERVALS with statistics
+puts "\n===== METHOD 2: MULTIPLE TIME INTERVALS ====="
+
+# Calculate for different lag times (1-5 = 10-50 ns)
+set maxlag 5
+set D_estimates {}
+
+for {set lag 1} {$lag <= $maxlag} {incr lag} {
+    set sum_msd 0.0
+    set lag_count 0
+    
+    for {set i 0} {$i < $npoints-$lag} {incr i} {
+        set dr [vecsub [lindex $com_traj [expr {$i+$lag}]] [lindex $com_traj $i]]
+        set sum_msd [expr {$sum_msd + [vecdot $dr $dr]}]
+        incr lag_count
+    }
+    
+    if {$lag_count > 0} {
+        set msd_lag [expr {$sum_msd / $lag_count}]
+        set time_lag [expr {$lag * $dt_frame}]
+        set D_lag [expr {($msd_lag * 1e-20) / (6 * $time_lag)}]
+        lappend D_estimates $D_lag
+        
+        puts "  Lag $lag ([format "%.0f" [expr {$time_lag * 1e9}]] ns):"
+        puts "    MSD = [format "%.1f" $msd_lag] Å², D = [format "%.3e" $D_lag] m²/s"
+    }
+}
+
+# Statistics of D estimates
+if {[llength $D_estimates] > 1} {
+    set sum_D 0.0
+    set sum_D2 0.0
+    
+    foreach D_val $D_estimates {
+        set sum_D [expr {$sum_D + $D_val}]
+        set sum_D2 [expr {$sum_D2 + $D_val * $D_val}]
+    }
+    
+    set D_mean [expr {$sum_D / [llength $D_estimates]}]
+    set D_std [expr {sqrt(($sum_D2 - $sum_D * $sum_D / [llength $D_estimates]) / ([llength $D_estimates] - 1))}]
+    
+    puts "\n  Statistics from multiple time intervals:"
+    puts "  Mean D = [format "%.3e" $D_mean] m²/s"
+    puts "  Std dev = ±[format "%.2e" $D_std] m²/s"
+    puts "  Relative error = ±[format "%.1f" [expr {100.0 * $D_std / $D_mean}]]%"
+}
+
+# Method 3: LINEAR REGRESSION on MSD vs time
+puts "\n===== METHOD 3: LINEAR REGRESSION ====="
+
+# Calculate MSD for times 10-100 ns (lags 1-10)
+set times {}
+set msds_m2 {}
+
+for {set lag 1} {$lag <= 10} {incr lag} {
+    set sum_msd 0.0
+    set count 0
+    
+    for {set i 0} {$i < $npoints-$lag} {incr i} {
+        set dr [vecsub [lindex $com_traj [expr {$i+$lag}]] [lindex $com_traj $i]]
+        set sum_msd [expr {$sum_msd + [vecdot $dr $dr]}]
+        incr count
+    }
+    
+    if {$count > 0} {
+        set msd_ang2 [expr {$sum_msd / $count}]
+        lappend times [expr {$lag * $dt_frame}]
+        lappend msds_m2 [expr {$msd_ang2 * 1e-20}]
+    }
+}
+
+# Linear regression
+if {[llength $times] >= 3} {
+    set sum_x 0.0
+    set sum_y 0.0
+    set sum_xy 0.0
+    set sum_x2 0.0
+    set n [llength $times]
+    
+    for {set i 0} {$i < $n} {incr i} {
+        set x [lindex $times $i]
+        set y [lindex $msds_m2 $i]
+        
+        set sum_x [expr {$sum_x + $x}]
+        set sum_y [expr {$sum_y + $y}]
+        set sum_xy [expr {$sum_xy + $x * $y}]
+        set sum_x2 [expr {$sum_x2 + $x * $x}]
+    }
+    
+    set m [expr {($n * $sum_xy - $sum_x * $sum_y) / ($n * $sum_x2 - $sum_x * $sum_x)}]
+    set D_reg [expr {$m / 6.0}]
+    
+    # R² calculation
+    set y_mean [expr {$sum_y / $n}]
+    set ss_total 0.0
+    set ss_residual 0.0
+    
+    for {set i 0} {$i < $n} {incr i} {
+        set x [lindex $times $i]
+        set y [lindex $msds_m2 $i]
+        set y_pred [expr {$m * $x}]
+        
+        set ss_total [expr {$ss_total + ($y - $y_mean) * ($y - $y_mean)}]
+        set ss_residual [expr {$ss_residual + ($y - $y_pred) * ($y - $y_pred)}]
+    }
+    
+    set r_squared [expr {1.0 - $ss_residual / $ss_total}]
+    
+    puts "  Linear regression (lags 1-10):"
+    puts "    D = [format "%.3e" $D_reg] m²/s"
+    puts "    R² = [format "%.4f" $r_squared]"
+}
+
+# FINAL RESULT
+puts "\n===== FINAL RESULT ====="
+
+# Use the simple method as most reliable
+set D_final $D_simple
+set D_free 5.0e-9  ;# Expected free diffusion
+
+puts "Diffusion coefficient:"
+puts "  D = [format "%.3e" $D_final] m²/s"
+puts "     = [format "%.3f" [expr {$D_final * 1e9}]] × 10⁻⁹ m²/s"
+puts "     = [format "%.2f" [expr {$D_final * 1e10}]] × 10⁻¹⁰ m²/s"
+
+puts "\nComparison with free diffusion:"
+set slowing_factor [expr {$D_free / $D_final}]
+puts "  Expected free diffusion: D_free = 5.0 × 10⁻⁹ m²/s"
+puts "  Slowing factor: [format "%.0f" $slowing_factor]×"
+
+puts "\nHydrodynamic radius:"
+set kB 1.380649e-23
+set T 310.0
+set eta 0.000691
+set R_h [expr {$kB * $T / (6 * 3.14159 * $eta * $D_final)}]
+puts "  R_h = [format "%.1f" [expr {$R_h * 1e10}]] Å"
+
+# Compare with expected size (from 53 atoms)
+puts "\nExpected size for 53-atom ligand:"
+puts "  Typical R_h ≈ 5-10 Å"
+puts "  Your measured R_h = [format "%.1f" [expr {$R_h * 1e10}]] Å"
+puts "  Ratio: [format "%.1f" [expr {($R_h * 1e10) / 7.5}]]× larger than expected"
+
+# Save to file
+set out [open "final_ligand_diffusion.txt" w]
+puts $out "# ===== FINAL LIGAND DIFFUSION =====\n"
+puts $out "D = [format "%.3e" $D_final] m^2/s"
+puts $out "D = [format "%.3f" [expr {$D_final * 1e9}]] × 10⁻⁹ m²/s"
+puts $out "D = [format "%.2f" [expr {$D_final * 1e10}]] × 10⁻¹⁰ m²/s\n"
+puts $out "Slowing_factor = [format "%.0f" $slowing_factor]"
+puts $out "R_h = [format "%.1f" [expr {$R_h * 1e10}]] Å\n"
+puts $out "MSD(10 ns) = [format "%.1f" $msd_avg] Å²"
+puts $out "Comparisons = $count"
+close $out
+
+puts "\nResults saved to: final_ligand_diffusion.txt"
+
+# Additional check: Plot suggestion
+puts "\n===== RECOMMENDATION ====="
+if {$slowing_factor > 100} {
+    puts "⚠️  Your ligand diffuses >100× slower than expected."
+    puts "   This suggests either:"
+    puts "   1. Ligand is interacting strongly with protein"
+    puts "   2. Simulation force field issues"
+    puts "   3. Ligand is larger than 53 atoms suggests"
+} else {
+    puts "✓ Diffusion coefficient is reasonable for a ligand in simulation."
+}
+
+puts "\nFor publication, report:"
+puts "D = [format "%.3f" [expr {$D_final * 1e9}]] × 10⁻⁹ m²/s"
+puts "(corresponding to [format "%.0f" $slowing_factor]-fold reduction from free diffusion)"
