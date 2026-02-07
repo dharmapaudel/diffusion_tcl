@@ -1,0 +1,87 @@
+puts "\n===== FINAL VALIDATION OF DIFFUSION COEFFICIENT ====="
+
+# Based on your earlier total displacement result:
+set total_MSD 5016.49  ;# Å² from total displacement over 350 ns
+set total_time 3.5e-7   ;# 350 ns = 3.5e-7 s
+
+# Method A: From total displacement (most robust)
+set D_total [expr {($total_MSD * 1e-20) / (6 * $total_time)}]
+
+puts "Method A - From total displacement over 350 ns:"
+puts "  Total MSD = [format "%.1f" $total_MSD] Å²"
+puts "  Total time = [format "%.1f" [expr {$total_time * 1e9}]] ns"
+puts "  D = MSD/(6t) = [format "%.3e" $D_total] m²/s"
+
+# Method B: Simple MSD from your earlier lag=1 calculation
+set MSD_lag1 731.98   ;# Å² from your earlier output
+set time_lag1 1.0e-8   ;# 10 ns
+
+set D_lag1 [expr {($MSD_lag1 * 1e-20) / (6 * $time_lag1)}]
+
+puts "\nMethod B - From MSD at 10 ns interval:"
+puts "  MSD(10 ns) = [format "%.1f" $MSD_lag1] Å²"
+puts "  Time = 10 ns"
+puts "  D = [format "%.3e" $D_lag1] m²/s"
+
+# Method C: Check consistency
+puts "\nConsistency check:"
+puts "  D_total / D_lag1 = [format "%.2f" [expr {$D_total / $D_lag1}]]"
+if {abs($D_total/$D_lag1 - 1.0) < 0.5} {
+    puts "  ✓ Values are consistent within 50%"
+} else {
+    puts "  ⚠️  WARNING: Significant discrepancy!"
+}
+
+# Calculate proper uncertainty
+puts "\n===== UNCERTAINTY ESTIMATION ====="
+
+# From your bootstrap results:
+set D_bootstrap 9.92e-12
+set std_bootstrap 2.50e-12
+
+# Relative error
+set rel_error [expr {100.0 * $std_bootstrap / $D_bootstrap}]
+
+puts "Based on bootstrap resampling (n=100):"
+puts "  D = [format "%.2e" $D_bootstrap] ± [format "%.2e" $std_bootstrap] m²/s"
+puts "  Relative uncertainty: ±[format "%.1f" $rel_error]%"
+
+# Calculate SEM for n=5 blocks
+set SEM [expr {$std_bootstrap / sqrt(5)}]
+set t_value 2.776  ;# for 95% CI, df=4
+set CI_95 [expr {$t_value * $SEM}]
+
+puts "\nAssuming 5 independent blocks:"
+puts "  Standard Error of Mean (SEM): ±[format "%.2e" $SEM] m²/s"
+puts "  95% Confidence Interval: ±[format "%.2e" $CI_95] m²/s"
+
+# Final reporting value
+puts "\n===== FINAL REPORTING VALUE ====="
+
+# Use the more reliable total displacement method
+# But scale uncertainty from bootstrap
+set D_final $D_total
+set err_final [expr {$D_final * $rel_error / 100.0}]
+
+puts "Recommended for publication:"
+puts ""
+puts "Diffusion coefficient:"
+puts "  D = ([format "%.2f" [expr {$D_final * 1e9}]] ± [format "%.2f" [expr {$err_final * 1e9}]]) × 10⁻⁹ m²/s"
+puts ""
+puts "Relative to free diffusion (D_free = 5.0 × 10⁻⁹ m²/s):"
+set slowing_factor [expr {5.0e-9 / $D_final}]
+set slowing_err [expr {$slowing_factor * $rel_error / 100.0}]
+puts "  Slowing factor = [format "%.0f" $slowing_factor] ± [format "%.0f" $slowing_err]"
+puts ""
+puts "Hydrodynamic radius (from Stokes-Einstein):"
+set kB 1.380649e-23
+set T 310.0
+set eta 0.000691
+set R_h [expr {$kB * $T / (6 * 3.14159 * $eta * $D_final)}]
+puts "  R_h = [format "%.1f" [expr {$R_h * 1e10}]] Å"
+
+# Compare with your Rg
+puts "\nComparison with radius of gyration:"
+puts "  Your Rg = 3.93 Å"
+puts "  For spheres: R_h ≈ 1.29 × Rg = 5.07 Å"
+puts "  Measured R_h / Theoretical R_h = [format "%.2f" [expr {($R_h * 1e10) / 5.07}]]"
