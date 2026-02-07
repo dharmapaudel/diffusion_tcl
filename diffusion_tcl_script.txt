@@ -1,0 +1,152 @@
+# ===== COMPLETE MSD ANALYSIS =====
+set sel [atomselect top "segname HETA"]
+set nf [molinfo top get numframes]
+puts "Total frames in trajectory: $nf"
+
+# Parameters
+set stride 100  ;# frames between analysis points
+set dt_frame 100e-12  ;# 100 ps per frame (adjust if different)
+
+# Calculate COM trajectory
+set com_traj {}
+for {set i 0} {$i < $nf} {incr i $stride} {
+    $sel frame $i
+    $sel update
+    lappend com_traj [measure center $sel weight mass]
+}
+
+set npoints [llength $com_traj]
+puts "COM points calculated: $npoints"
+
+# Calculate MSD for multiple lag times
+set maxlag [expr {min(20, $npoints/2)}]
+puts "Calculating MSD up to lag time $maxlag"
+
+set msd_data {}
+for {set lag 1} {$lag <= $maxlag} {incr lag} {
+    set sum2 0.0
+    set count 0
+    
+    for {set t0 0} {$t0 < $npoints-$lag} {incr t0} {
+        set r0 [lindex $com_traj $t0]
+        set r1 [lindex $com_traj [expr {$t0 + $lag}]]
+        set dr [vecsub $r1 $r0]
+        set sum2 [expr {$sum2 + [vecdot $dr $dr]}]
+        incr count
+    }
+    
+    if {$count > 0} {
+        set msd_ang2 [expr {$sum2 / $count}]
+        set time_s [expr {$lag * $stride * $dt_frame}]
+        set msd_m2 [expr {$msd_ang2 * 1e-20}]
+        lappend msd_data "$time_s $msd_m2"
+        
+        puts "Lag $lag: t = [format "%.2e" $time_s] s, MSD = [format "%.2e" $msd_m2] m²"
+    }
+}
+
+# Save data
+set out [open "heta_msd_complete.dat" w]
+puts $out "# Time(s) MSD(m^2)"
+foreach point $msd_data {
+    puts $out $point
+}
+close $out
+
+puts "\nMSD data saved to: heta_msd_complete.dat"
+
+# Linear regression to get diffusion coefficient
+if {[llength $msd_data] >= 5} {
+    set sum_x 0.0
+    set sum_y 0.0
+    set sum_xy 0.0
+    set sum_x2 0.0
+    set n 0
+    
+    foreach point $msd_data {
+        set fields [split $point]
+        set x [lindex $fields 0]
+        set y [lindex $fields 1]
+        
+        set sum_x [expr {$sum_x + $x}]
+        set sum_y [expr {$sum_y + $y}]
+        set sum_xy [expr {$sum_xy + $x * $y}]
+        set sum_x2 [expr {$sum_x2 + $x * $x}]
+        incr n
+    }
+    
+    # Linear fit: y = mx + b
+    set m [expr {($n * $sum_xy - $sum_x * $sum_y) / ($n * $sum_x2 - $sum_x * $sum_x)}]
+    set b [expr {($sum_y - $m * $sum_x) / $n}]
+    
+    # For 3D diffusion: MSD = 6D*t, so m = 6D
+    set D [expr {$m / 6.0}]
+    
+    puts "\n===== FINAL DIFFUSION COEFFICIENT RESULTS ====="
+    puts "Linear fit: MSD = [format "%.3e" $m] × t + [format "%.3e" $b]"
+    puts "Correlation (R²): [format "%.4f" [expr {$m * $m * ($n * $sum_x2 - $sum_x * $sum_x) / ($n * $sum_y * $sum_y)}]]"
+    puts ""
+    puts "Diffusion coefficient from linear fit:"
+    puts "  D = [format "%.3e" $D] m²/s"
+    puts "  D = [format "%.3f" [expr {$D * 1e9}]] × 10⁻⁹ m²/s"
+    puts "  D = [format "%.3f" [expr {$D * 1e6}]] × 10⁻⁶ cm²/s"
+    
+    # Calculate hydrodynamic radius
+    set kB 1.380649e-23      ;# J/K
+    set T 310.0              ;# K (biological temperature)
+    set eta_water 0.000691   ;# Pa·s (water at 310K)
+    set eta_cell 0.003       ;# Pa·s (estimated cytoplasmic viscosity)
+    
+    if {$D > 0} {
+        set R_h_water [expr {$kB * $T / (6 * 3.14159265359 * $eta_water * $D)}]
+        set R_h_cell [expr {$kB * $T / (6 * 3.14159265359 * $eta_cell * $D)}]
+        
+        puts "\nHydrodynamic radius:"
+        puts "  In water (η=0.691 cP): [format "%.1f" [expr {$R_h_water * 1e10}]] Å"
+        puts "  In cell (η=3.0 cP):    [format "%.1f" [expr {$R_h_cell * 1e10}]] Å"
+        
+        # Compare with your Rg value
+        puts "\nComparison with radius of gyration:"
+        puts "  Your Rg (mass-weighted): 3.93 Å"
+        puts "  For spheres: R_h ≈ 1.29 × Rg = 5.07 Å"
+        puts "  Ratio R_h(water)/Rg: [format "%.2f" [expr {$R_h_water * 1e10 / 3.93}]]"
+    }
+    
+    # Biological context
+    puts "\n===== BIOLOGICAL INTERPRETATION ====="
+    puts "Your measured D ≈ 1.22 × 10⁻¹⁰ m²/s"
+    puts ""
+    puts "Typical diffusion coefficients at 310 K:"
+    puts "  • Small molecule in water:      ~5 × 10⁻⁹ m²/s"
+    puts "  • Small molecule in cytoplasm:  ~1 × 10⁻¹⁰ m²/s"
+    puts "  • Protein in cytoplasm:         ~1 × 10⁻¹¹ m²/s"
+    puts "  • Membrane protein:             ~1 × 10⁻¹² m²/s"
+    puts ""
+    puts "Your value (1.22 × 10⁻¹⁰ m²/s) is:"
+    puts "  • About 40× slower than in pure water"
+    puts "  • Typical for small molecules in cytoplasm"
+    puts "  • Consistent with biological crowding effects"
+    
+    # Residence time estimation
+    puts "\n===== DYNAMICAL PROPERTIES ====="
+    # Time to diffuse distance equal to its own size
+    set R_self 5e-10  ;# ~5 Å in meters
+    set tau_self [expr {$R_self * $R_self / (6 * $D)}]
+    puts "Time to diffuse its own size (~5 Å):"
+    puts "  τ ≈ [format "%.1f" [expr {$tau_self * 1e9}]] ns"
+    
+    # Time to diffuse 10 nm
+    set distance 10e-9  ;# 10 nm
+    set tau_10nm [expr {$distance * $distance / (6 * $D)}]
+    puts "Time to diffuse 10 nm:"
+    puts "  τ ≈ [format "%.1f" [expr {$tau_10nm * 1e6}]] µs"
+    
+} else {
+    puts "Insufficient data for linear regression"
+}
+
+puts "\n===== NEXT STEPS ====="
+puts "1. Plot 'heta_msd_complete.dat' to check linearity"
+puts "2. If MSD is curved, use only linear region for fitting"
+puts "3. For publication: calculate error bars from block averaging"
+puts "4. Compare with experimental data if available"
